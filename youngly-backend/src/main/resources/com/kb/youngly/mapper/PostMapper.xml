@@ -1,0 +1,494 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.kb.youngly.mapper.PostMapper">
+
+<!-- DB의 빈 인증 게시글(NONE) 상태를 PENDING으로 수정(UPDATE)하는 메서드 -->
+    <update id="updatePost"
+            parameterType="com.kb.youngly.vo.post.PostVO">
+        UPDATE posts
+        SET photo_url = #{photoUrl},
+            content = #{content},
+            post_status = 'PENDING',
+            posted_at = NOW(),
+            status_changed_at = NULL,
+            like_count = 0,
+            dislike_count = 0,
+            comment_count = 0,
+            reject_count = 0,
+            approve_count = 0
+        WHERE post_id = #{postId}
+          AND post_status = 'NONE'
+    </update>
+
+
+    <!-- 오늘 미리 생성된 NONE 게시글 조회 -->
+    <select id="findTodayEmptyPostId" resultType="long">
+        SELECT post_id
+        FROM posts
+        WHERE round_id = #{roundId}
+          AND user_id = #{userId}
+          AND post_status = 'NONE'
+          AND DATE(created_at) = CURRENT_DATE
+        ORDER BY created_at DESC
+            LIMIT 1
+            FOR UPDATE
+    </select>
+
+    <!-- 오늘 이미 등록한 인증 게시글이 있는지 확인 -->
+    <select id="countTodayUploadedPost" resultType="int">
+        SELECT COUNT(*)
+        FROM posts
+        WHERE round_id = #{roundId}
+          AND user_id = #{userId}
+          AND post_status != 'NONE'
+      AND DATE(posted_at) = CURRENT_DATE
+    </select>
+
+    <!-- NONE 게시글이 없는 경우 새 게시글 생성 -->
+    <insert id="insertPost"
+            parameterType="com.kb.youngly.vo.post.PostVO"
+            useGeneratedKeys="true"
+            keyProperty="postId">
+        INSERT INTO posts (
+            round_id,
+            user_id,
+            photo_url,
+            content,
+            post_status,
+            created_at,
+            updated_at,
+            posted_at,
+            like_count,
+            dislike_count,
+            comment_count,
+            reject_count,
+            approve_count
+        )
+        VALUES (
+                   #{roundId},
+                   #{userId},
+                   #{photoUrl},
+                   #{content},
+                   'PENDING',
+                   NOW(),
+                   NOW(),
+                   NOW(),
+                   0,
+                   0,
+                   0,
+                   0,
+                   0
+               )
+    </insert>
+<!-- 1. 특정 라운드(그룹)의 날짜별 피드 리스트 조회 (최신 댓글 1개 포함) -->
+<select id="getFeedListByDate" resultType="com.kb.youngly.dto.posts.FeedListResponseDTO">
+    SELECT p.post_id, CASE
+                          WHEN p.photo_url IS NULL OR p.photo_url LIKE '/%' THEN p.photo_url
+                          ELSE CONCAT('/uploads/', p.photo_url)
+        END AS photoUrl, p.content, p.posted_at,
+    p.like_count, p.dislike_count, p.comment_count, p.post_status,
+    u.user_id, u.nickname, u.profile_image_url, p.approve_count AS approveCount,
+           p.reject_count AS rejectCount,
+
+       (
+           SELECT pr.reaction_type
+           FROM post_reactions pr
+           WHERE pr.post_id = p.post_id
+             AND pr.user_id = #{currentUserId}
+           LIMIT 1
+    ) AS my_reaction,
+
+    (
+    SELECT pa.approval_status
+    FROM post_approvals pa
+    WHERE pa.post_id = p.post_id
+      AND pa.user_id = #{currentUserId}
+            LIMIT 1
+            ) AS myApproval,
+
+    (SELECT content
+    FROM post_comments
+    WHERE post_id = p.post_id
+    ORDER BY created_at DESC
+    LIMIT 1) AS latest_comment_content
+
+    FROM posts p
+    JOIN users u ON p.user_id = u.user_id
+    WHERE p.round_id = #{roundId}
+    AND DATE(p.posted_at) = #{date}
+    AND p.post_status != 'NONE'
+    ORDER BY p.posted_at DESC
+</select>
+
+    <!-- 로그인 사용자의 인증 캘린더 기간 조회: posted_at 오름차순 -->
+    <select id="getMyPostsByPeriod"
+            resultType="com.kb.youngly.dto.posts.MyPostCalendarResponseDTO">
+        SELECT
+            p.post_id AS postId,
+            p.round_id AS roundId,
+            r.group_id AS groupId,
+            g.group_name AS groupName,
+            CASE
+                WHEN p.photo_url IS NULL OR p.photo_url LIKE '/%' THEN p.photo_url
+                ELSE CONCAT('/uploads/', p.photo_url)
+            END AS photoUrl,
+            p.content AS content,
+            p.post_status AS postStatus,
+            p.posted_at AS postedAt,
+            p.status_changed_at AS statusChangedAt,
+            p.like_count AS likeCount,
+            p.dislike_count AS dislikeCount,
+            CASE WHEN p.post_status = 'REJECTED' THEN (
+                SELECT pa.reject_reason
+                FROM post_approvals pa
+                WHERE pa.post_id = p.post_id
+                  AND pa.approval_status = 'REJECT'
+                  AND pa.reject_reason IS NOT NULL
+                ORDER BY pa.created_at DESC, pa.post_approval_id DESC
+                LIMIT 1
+            ) ELSE NULL END AS rejectReason
+        FROM posts p
+                 INNER JOIN rounds r ON r.round_id = p.round_id
+                 INNER JOIN `groups` g ON g.group_id = r.group_id
+        WHERE p.user_id = #{userId}
+          AND p.post_status != 'NONE'
+          AND p.posted_at >= #{from}
+          AND p.posted_at &lt; DATE_ADD(#{to}, INTERVAL 1 DAY)
+        <if test="groupId != null">
+            AND r.group_id = #{groupId}
+        </if>
+        ORDER BY p.posted_at ASC, p.post_id ASC
+    </select>
+
+    <!-- 현재 상태와 무관한 그룹 참여 이력 검증. 과거 라운드 기록도 허용한다. -->
+    <select id="checkGroupParticipationHistory" resultType="boolean">
+        SELECT COUNT(*) > 0
+        FROM `groups` g
+        WHERE g.group_id = #{groupId}
+          AND (
+              g.user_id = #{userId}
+              OR EXISTS (
+                  SELECT 1
+                  FROM group_users gu
+                  WHERE gu.group_id = g.group_id
+                    AND gu.user_id = #{userId}
+                    AND gu.group_user_status IN ('ACTIVE', 'WITHDRAWN')
+              )
+              OR EXISTS (
+                  SELECT 1
+                  FROM rounds r
+                           INNER JOIN round_history rh ON rh.round_id = r.round_id
+                  WHERE r.group_id = g.group_id
+                    AND rh.user_id = #{userId}
+              )
+          )
+    </select>
+
+<!-- 2. 특정 게시글의 전체 댓글 목록 조회 (과거순) -->
+<select id="getCommentsByPostId" resultType="com.kb.youngly.dto.posts.CommentDTO">
+    SELECT c.post_comment_id, c.content, c.created_at,
+    u.user_id, u.nickname, u.profile_image_url
+    FROM post_comments c
+    JOIN users u ON c.user_id = u.user_id
+    WHERE c.post_id = #{postId}
+    ORDER BY c.created_at ASC
+</select>
+
+<!-- 3. 특정 게시글에 특정 리액션(LIKE/DISLIKE)을 한 유저 목록 조회 -->
+<select id="getReactionUsersByPostId" resultType="com.kb.youngly.dto.posts.ReactionUserDTO">
+    SELECT u.user_id, u.nickname, u.profile_image_url
+    FROM post_reactions pr
+    JOIN users u ON pr.user_id = u.user_id
+    WHERE pr.post_id = #{postId}
+    AND pr.reaction_type = #{reactionType}
+    ORDER BY pr.created_at DESC
+</select>
+
+<!-- 그룹 멤버십 검증 쿼리 -->
+    <select id="checkGroupMembership" resultType="boolean">
+        SELECT COUNT(*) > 0
+        FROM rounds r
+        WHERE r.round_id = #{roundId}
+          AND r.round_status = 'ONGOING'
+          AND EXISTS (
+            SELECT 1
+            FROM round_history rh
+            WHERE rh.round_id = r.round_id
+              AND rh.user_id = #{userId}
+        )
+          AND (
+                EXISTS (
+                    SELECT 1
+                    FROM `groups` g
+                    WHERE g.group_id = r.group_id
+                      AND g.user_id = #{userId}
+                )
+                OR EXISTS (
+                SELECT 1
+                FROM group_users gu
+                WHERE gu.group_id = r.group_id
+                  AND gu.user_id = #{userId}
+                  AND gu.group_user_status = 'ACTIVE'
+            )
+            )
+    </select>
+
+    <!-- 게시물 승인 및 반려 API - 본인 검증 및 과반수 계산용 -->
+    <select id="getPostById"
+            resultType="com.kb.youngly.dto.posts.PostDTO">
+        SELECT
+            post_id,
+            user_id,
+            photo_url,
+            post_status,
+            round_id,
+            approve_count,
+            reject_count,
+            like_count,
+            dislike_count,
+            posted_at AS postedAt
+        FROM posts
+        WHERE post_id = #{postId}
+    </select>
+
+<!-- 5. 중복 평가 여부 확인 -->
+<select id="checkDuplicateApproval" resultType="int">
+    SELECT COUNT(*)
+    FROM post_approvals
+    WHERE post_id = #{postId} AND user_id = #{userId}
+</select>
+
+<!-- 6. 평가 내역 저장 -->
+    <insert id="insertPostApproval">
+        INSERT INTO post_approvals (
+            user_id,
+            post_id,
+            approval_status,
+            reject_reason,
+            created_at,
+            updated_at
+        )
+        VALUES (
+                   #{userId},
+                   #{postId},
+                   #{dto.approvalStatus},
+                   #{dto.rejectReason},
+                   NOW(),
+                   NOW()
+               )
+    </insert>
+
+<!-- 7-1. 승인 시 posts 테이블의 승인 카운트 +1 증가 -->
+<update id="incrementApproveCount">
+    UPDATE posts
+    SET approve_count = approve_count + 1
+    WHERE post_id = #{postId}
+</update>
+
+<!-- 7-2. 반려 시 posts 테이블의 반려 카운트 +1 증가 -->
+<update id="incrementRejectCount">
+    UPDATE posts
+    SET reject_count = reject_count + 1
+    WHERE post_id = #{postId}
+</update>
+
+<!-- 8. 특정 라운드에 속한 그룹의 전체 활성 멤버 수 조회 (과반수 계산용) -->
+<!-- posts 테이블에는 round_id만 있으므로, rounds 테이블과 group_users를 조인해서 계산 -->
+<select id="getTotalGroupMembersByRoundId" resultType="int">
+    SELECT COUNT(*)
+    FROM rounds r
+             JOIN group_users gu ON r.group_id = gu.group_id
+    WHERE r.round_id = #{roundId}
+      AND gu.group_user_status = 'ACTIVE'
+</select>
+
+<!-- 9. 과반수 투표 달성 시 게시글의 최종 상태 및 상태변경시간 업데이트 -->
+<!-- DB ENUM 조건에 따라 status에는 'APPROVED' 또는 'REJECTED'가 들어옴 -->
+<update id="updatePostStatus">
+    UPDATE posts
+    SET post_status = #{status},
+        status_changed_at = NOW()
+    WHERE post_id = #{postId}
+</update>
+
+<!-- 10. 작성일 기준 다음날 하루(유예 기간)가 지나고, 그 다음날 자정이 되면 PENDING 상태의 게시글 일괄 자동 승인 -->
+<update id="updatePostsToAutoApproved">
+    UPDATE posts
+    SET post_status = 'APPROVED',
+    status_changed_at = NOW()
+    WHERE post_status = 'PENDING'
+    AND posted_at &lt; DATE_SUB(CURRENT_DATE, INTERVAL 1 DAY) <!--  오늘 기준 하루 전(어제 자정)보다 과거인 글만 타겟팅!-->
+</update>
+
+    <!-- 인증 게시물 업로드 알림 대상자 조회 -->
+    <!-- 같은 라운드의 ACTIVE 참여자 중 게시물 작성자는 제외 -->
+    <select id="findNotificationUserIds" resultType="string">
+        SELECT gu.user_id
+        FROM rounds r
+                 INNER JOIN group_users gu
+                            ON gu.group_id = r.group_id
+        WHERE r.round_id = #{roundId}
+          AND gu.group_user_status = 'ACTIVE'
+          AND gu.user_id != #{userId}
+        ORDER BY gu.group_user_id
+    </select>
+
+    <!-- 인증 게시물 작성자의 닉네임 조회 -->
+    <select id="findUserNickname" resultType="string">
+        SELECT nickname
+        FROM users
+        WHERE user_id = #{userId}
+    </select>
+
+    <!-- 댓글 등록 -->
+    <insert id="insertPostComment"
+            parameterType="com.kb.youngly.vo.post.PostCommentVO"
+            useGeneratedKeys="true"
+            keyProperty="postCommentId">
+        INSERT INTO post_comments (
+            user_id,
+            post_id,
+            content,
+            created_at,
+            updated_at
+        )
+        VALUES (
+                   #{userId},
+                   #{postId},
+                   #{content},
+                   NOW(),
+                   NOW()
+               )
+    </insert>
+
+    <!-- 게시글 댓글 수 증가 -->
+    <update id="incrementCommentCount">
+        UPDATE posts
+        SET comment_count = comment_count + 1
+        WHERE post_id = #{postId}
+    </update>
+
+    <!-- 방금 등록한 댓글 조회 -->
+    <select id="getCommentById"
+            resultType="com.kb.youngly.dto.posts.CommentDTO">
+        SELECT
+            c.post_comment_id,
+            c.content,
+            c.created_at,
+            u.user_id,
+            u.nickname,
+            u.profile_image_url
+        FROM post_comments c
+                 JOIN users u ON u.user_id = c.user_id
+        WHERE c.post_comment_id = #{postCommentId}
+    </select>
+
+    <!-- 현재 사용자의 반응 조회 -->
+    <select id="getPostReaction"
+            resultType="com.kb.youngly.vo.post.PostReactionVO">
+        SELECT
+            reaction_id,
+            post_id,
+            user_id,
+            reaction_type,
+            created_at,
+            updated_at
+        FROM post_reactions
+        WHERE post_id = #{postId}
+          AND user_id = #{userId}
+    </select>
+
+    <!-- 최초 반응 등록 -->
+    <insert id="insertPostReaction"
+            parameterType="com.kb.youngly.vo.post.PostReactionVO"
+            useGeneratedKeys="true"
+            keyProperty="reactionId">
+        INSERT INTO post_reactions (
+            post_id,
+            user_id,
+            reaction_type,
+            created_at,
+            updated_at
+        )
+        VALUES (
+                   #{postId},
+                   #{userId},
+                   #{reactionType},
+                   NOW(),
+                   NOW()
+               )
+    </insert>
+
+    <!-- 좋아요와 싫어요 변경 -->
+    <update id="updatePostReaction">
+        UPDATE post_reactions
+        SET reaction_type = #{reactionType},
+            updated_at = NOW()
+        WHERE post_id = #{postId}
+          AND user_id = #{userId}
+    </update>
+
+    <!-- 반응 취소 -->
+    <delete id="deletePostReaction">
+        DELETE FROM post_reactions
+        WHERE post_id = #{postId}
+          AND user_id = #{userId}
+    </delete>
+
+    <!-- 실제 반응 데이터를 기준으로 게시글 카운트 동기화 -->
+    <update id="syncPostReactionCounts">
+        UPDATE posts
+        SET like_count = (
+            SELECT COUNT(*)
+            FROM post_reactions
+            WHERE post_id = #{postId}
+              AND reaction_type = 'LIKE'
+        ),
+            dislike_count = (
+                SELECT COUNT(*)
+                FROM post_reactions
+                WHERE post_id = #{postId}
+                  AND reaction_type = 'DISLIKE'
+            )
+        WHERE post_id = #{postId}
+    </update>
+
+    <!-- 게시글의 댓글 삭제 -->
+    <delete id="deletePostComments">
+        DELETE FROM post_comments
+        WHERE post_id = #{postId}
+    </delete>
+
+    <!-- 게시글의 좋아요/싫어요 삭제 -->
+    <delete id="deletePostReactions">
+        DELETE FROM post_reactions
+        WHERE post_id = #{postId}
+    </delete>
+
+    <!-- 게시글의 승인/반려 내역 삭제 -->
+    <delete id="deletePostApprovals">
+        DELETE FROM post_approvals
+        WHERE post_id = #{postId}
+    </delete>
+
+    <!-- 다시 인증할 수 있도록 빈 게시글로 초기화 -->
+    <update id="resetPostForReupload">
+        UPDATE posts
+        SET photo_url = NULL,
+            content = NULL,
+            post_status = 'NONE',
+            posted_at = NULL,
+            status_changed_at = NULL,
+            like_count = 0,
+            dislike_count = 0,
+            comment_count = 0,
+            approve_count = 0,
+            reject_count = 0,
+            updated_at = NOW()
+        WHERE post_id = #{postId}
+          AND user_id = #{userId}
+          AND post_status != 'NONE'
+    </update>
+
+</mapper>

@@ -1,0 +1,307 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.kb.youngly.mapper.RoundMapper">
+
+    <!-- 매일 자동 전환할 진행 중 그룹의 당일 종료 라운드를 조회한다. -->
+    <select id="findDueRoundGroupIds" resultType="string">
+        SELECT r.group_id
+        FROM rounds r
+        INNER JOIN `groups` g ON g.group_id = r.group_id
+        WHERE g.group_status = 'ONGOING'
+          AND r.round_status = 'ONGOING'
+          AND r.end_date = #{endDate}
+        ORDER BY r.group_id
+    </select>
+
+    <!-- 지정한 날짜에 종료되는 진행 중 라운드를 조회한다. -->
+    <select id="findRoundsEndingOn"
+            resultType="com.kb.youngly.vo.round.RoundVO">
+        SELECT
+            round_id,
+            group_id,
+            round_no,
+            start_date,
+            end_date,
+            round_status,
+            created_at
+        FROM rounds
+        WHERE round_status = 'ONGOING'
+          AND end_date = #{endDate}
+        ORDER BY group_id, round_no
+    </select>
+
+    <!-- 같은 그룹에서 동시에 라운드를 만들 때 round_no가 중복되지 않도록 잠근다. -->
+    <select id="findGroupForUpdate"
+            resultType="com.kb.youngly.vo.group.GroupVO">
+        SELECT group_id,
+               moim_account_id,
+               user_id,
+               round_cycle_days,
+               default_fail_pass_count,
+               future_deposit_ratio_rule,
+               base_deposit_amount,
+               group_status
+        FROM `groups`
+        WHERE group_id = #{groupId}
+        FOR UPDATE
+    </select>
+
+    <!-- 다음 회차 번호와 자동 시작일을 계산하기 위해 직전 라운드를 조회한다. -->
+    <select id="findLatestRound"
+            resultType="com.kb.youngly.vo.round.RoundVO">
+        SELECT round_id,
+               group_id,
+               round_no,
+               start_date,
+               end_date,
+               round_status,
+               created_at
+        FROM rounds
+        WHERE group_id = #{groupId}
+        ORDER BY round_no DESC
+        LIMIT 1
+    </select>
+
+    <!-- 그룹이 진행한 전체 라운드를 최신 회차부터 조회한다. -->
+    <select id="findRoundsByGroupId"
+            resultType="com.kb.youngly.dto.round.RoundResponse">
+        SELECT round_id,
+               round_no,
+               start_date,
+               end_date,
+               round_status
+        FROM rounds
+        WHERE group_id = #{groupId}
+        ORDER BY round_no DESC
+    </select>
+
+    <!-- 대상 조회 후 상태가 바뀌었는지 그룹 잠금 안에서 다시 확인한다. -->
+    <select id="findOngoingRoundEndingOn"
+            resultType="com.kb.youngly.vo.round.RoundVO">
+        SELECT round_id,
+               group_id,
+               round_no,
+               start_date,
+               end_date,
+               round_status,
+               created_at
+        FROM rounds
+        WHERE group_id = #{groupId}
+          AND round_status = 'ONGOING'
+          AND end_date = #{endDate}
+        ORDER BY round_no DESC
+        LIMIT 1
+    </select>
+
+    <!-- AUTO_INCREMENT로 생성된 round_id는 RoundVO.roundId에 다시 매핑된다. -->
+    <insert id="insertRound"
+            parameterType="com.kb.youngly.vo.round.RoundVO"
+            useGeneratedKeys="true"
+            keyProperty="roundId">
+        INSERT INTO rounds (
+            group_id,
+            round_no,
+            start_date,
+            end_date,
+            round_status
+        ) VALUES (
+            #{groupId},
+            #{roundNo},
+            #{startDate},
+            #{endDate},
+            #{roundStatus}
+        )
+    </insert>
+
+    <!-- 중복 실행 시 이미 전환된 라운드가 다시 처리되지 않도록 기존 상태와 종료일을 확인한다. -->
+    <update id="markRoundWaitingSettlement">
+        UPDATE rounds
+        SET round_status = 'WAITING_SETTLEMENT'
+        WHERE round_id = #{roundId}
+          AND round_status = 'ONGOING'
+          AND end_date = #{endDate}
+    </update>
+
+    <!-- 첫 라운드 생성 시 모집 중인 그룹만 진행 중으로 전환한다. -->
+    <update id="startRecruitingGroup">
+        UPDATE `groups`
+        SET group_status = 'ONGOING',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE group_id = #{groupId}
+          AND group_status = 'RECRUITING'
+    </update>
+
+    <!--
+        라운드 생성 대상 상태의 사용자만 조회한다.
+        수령 계좌는 개인연금(INCOME)을 우선하고, 선택된 연금 계좌가 없으면
+        입출금 겸용 계좌(INOUTCOME)를 사용한다.
+    -->
+    <select id="findRoundParticipants"
+            resultType="com.kb.youngly.dto.round.RoundParticipantDTO">
+        SELECT gu.user_id,
+               (
+                   SELECT a.account_id
+                   FROM accounts a
+                   WHERE a.user_id = gu.user_id
+                     AND a.account_status IN ('INCOME', 'INOUTCOME')
+                   ORDER BY CASE a.account_status
+                                WHEN 'INCOME' THEN 0
+                                ELSE 1
+                            END,
+                            a.created_at DESC
+                   LIMIT 1
+               ) AS account_id
+        FROM group_users gu
+        WHERE gu.group_id = #{groupId}
+          AND gu.group_user_status IN ('PENDING_DEPOSIT', 'ACTIVE')
+        ORDER BY gu.group_user_id
+    </select>
+
+    <!-- 라운드 마감 임박 알림 대상 사용자 조회 -->
+    <select id="findRoundNotificationUsers"
+            resultType="string">
+        SELECT user_id
+        FROM round_history
+        WHERE round_id = #{roundId}
+    </select>
+
+    <!-- 순위, 정산 금액, 정산 시각은 라운드 종료 처리에서 채운다. -->
+    <insert id="insertRoundHistory"
+            parameterType="com.kb.youngly.vo.round.RoundHistoryVO"
+            useGeneratedKeys="true"
+            keyProperty="roundHistoryId">
+        INSERT INTO round_history (
+            round_id,
+            user_id,
+            account_id,
+            moim_account_id,
+            success_count,
+            remaining_fail_pass_count
+        ) VALUES (
+            #{roundId},
+            #{userId},
+            #{accountId},
+            #{moimAccountId},
+            #{successCount},
+            #{remainingFailPassCount}
+        )
+    </insert>
+
+    <select id="findRoundById"
+            resultType="com.kb.youngly.vo.round.RoundVO">
+
+        SELECT
+            round_id,
+            group_id,
+            round_no,
+            start_date,
+            end_date,
+            round_status,
+            created_at
+        FROM rounds
+        WHERE round_id = #{roundId}
+
+    </select>
+
+    <select id="findRoundUsers"
+            resultType="com.kb.youngly.dto.round.RoundUserResponse">
+
+        SELECT
+            rh.round_history_id AS roundUserId,
+            rh.user_id,
+            u.nickname,
+            rh.success_count
+        FROM round_history rh
+                 INNER JOIN users u
+                            ON rh.user_id = u.user_id
+        WHERE rh.round_id = #{roundId}
+        ORDER BY rh.success_count DESC,
+                 rh.round_history_id ASC
+
+    </select>
+
+    <select id="findRoundRanking"
+            resultType="com.kb.youngly.dto.round.RoundRankingResponse">
+
+        SELECT
+            rh.user_id AS userId,
+            u.nickname AS nickname,
+            RANK() OVER (
+            ORDER BY rh.success_count DESC
+        ) AS rankNo,
+            rh.success_count AS successCount
+        FROM round_history rh
+                 INNER JOIN users u
+                            ON u.user_id = rh.user_id
+        WHERE rh.round_id = #{roundId}
+        ORDER BY
+            rankNo ASC,
+            rh.round_history_id ASC
+
+    </select>
+    <update id="updateRoundRanks">
+
+        UPDATE round_history rh
+            INNER JOIN (
+            SELECT
+            ranked.round_history_id,
+            ranked.calculated_rank
+            FROM (
+            SELECT
+            rh2.round_history_id,
+            RANK() OVER (
+            ORDER BY rh2.success_count DESC
+            ) AS calculated_rank
+            FROM round_history rh2
+            WHERE rh2.round_id = #{roundId}
+            ) ranked
+            ) result
+        ON result.round_history_id = rh.round_history_id
+            SET rh.rank_no = result.calculated_rank
+        WHERE rh.round_id = #{roundId}
+
+    </update>
+    <select id="findRoundSettlements"
+            resultType="com.kb.youngly.dto.round.RoundSettlementResponse">
+
+        SELECT
+            rh.round_history_id AS settlementId,
+            rh.user_id AS userId,
+            rh.settlement_amount AS settlementAmount,
+            rh.settlement_at AS createdAt,
+            kb.bank_name AS bankName,
+            CASE
+                WHEN kb.account_number IS NULL THEN NULL
+                WHEN CHAR_LENGTH(kb.account_number) &lt;= 8 THEN '****'
+                ELSE CONCAT(
+                    LEFT(kb.account_number, 4),
+                        REPEAT('*', CHAR_LENGTH(kb.account_number) - 8),
+                    RIGHT(kb.account_number, 4)
+            )
+                END AS maskedAccountNumber
+        FROM round_history rh
+                 LEFT JOIN kb_transfer_requests ktr
+                           ON ktr.round_id = rh.round_id
+                               AND ktr.settlement_receiver_id = rh.user_id
+                               AND ktr.transaction_category = 'SETTLEMENT'
+                               AND ktr.transfer_status = 'SUCCESS'
+                 LEFT JOIN kb_accounts kb
+                           ON kb.kb_account_id = ktr.destination_kb_account_id
+        WHERE rh.round_id = #{roundId}
+          AND rh.settlement_at IS NOT NULL
+        ORDER BY
+            rh.rank_no ASC,
+            rh.user_id ASC
+
+    </select>
+    <select id="existsRound" resultType="boolean">
+        SELECT EXISTS (
+            SELECT 1
+            FROM rounds
+            WHERE round_id = #{roundId}
+        )
+    </select>
+</mapper>

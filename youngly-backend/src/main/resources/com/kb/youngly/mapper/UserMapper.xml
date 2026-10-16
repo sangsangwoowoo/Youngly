@@ -1,0 +1,191 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.kb.youngly.mapper.UserMapper">
+
+    <select id="existsLoginId"
+            parameterType="java.lang.String"
+            resultType="int">
+
+        SELECT COUNT(*)
+        FROM users
+        WHERE login_id = #{loginId}
+
+    </select>
+
+    <select id="existsEmail"
+            parameterType="java.lang.String"
+            resultType="int">
+
+        SELECT COUNT(*)
+        FROM users
+        WHERE email = #{email}
+
+    </select>
+
+    <insert id="insertUser"
+            parameterType="com.kb.youngly.vo.user.UserVO">
+
+        INSERT INTO users (
+            user_id,
+            name,
+            birthday,
+            login_id,
+            nickname,
+            email,
+            profile_image_url,
+            created_at,
+            password,
+            user_status,
+            point
+        )
+        VALUES (
+                   #{userId},
+                   #{name},
+                   #{birthday},
+                   #{loginId},
+                   #{nickname},
+                   #{email},
+                   #{profileImageUrl},
+                   NOW(),
+                   #{password},
+                   'ACTIVE',
+                   0
+               )
+
+    </insert>
+
+    <select id="findByLoginId"
+            parameterType="java.lang.String"
+            resultType="com.kb.youngly.vo.user.UserVO">
+
+        SELECT
+            user_id,
+            name,
+            birthday,
+            login_id,
+            nickname,
+            email,
+            profile_image_url,
+            created_at,
+            updated_at,
+            password,
+            user_status,
+            point,
+            is_notification_agreement
+        FROM users
+        WHERE login_id = #{loginId}
+          AND user_status = 'ACTIVE'
+
+    </select>
+
+    <select id="findByUserId"
+            parameterType="java.lang.String"
+            resultType="com.kb.youngly.vo.user.UserVO">
+
+        SELECT
+            user_id,
+            name,
+            birthday,
+            login_id,
+            nickname,
+            email,
+            profile_image_url,
+            created_at,
+            updated_at,
+            password,
+            user_status,
+            point,
+            is_notification_agreement
+        FROM users
+        WHERE user_id = #{userId}
+
+    </select>
+
+    <update id="updateUser"
+            parameterType="com.kb.youngly.vo.user.UserVO">
+
+        UPDATE users
+        SET
+            nickname = #{nickname},
+            profile_image_url = #{profileImageUrl},
+            updated_at = NOW()
+        WHERE user_id = #{userId}
+
+    </update>
+
+    <update id="updatePassword"
+            parameterType="com.kb.youngly.vo.user.UserVO">
+
+        UPDATE users
+        SET
+            password = #{password},
+            updated_at = NOW()
+        WHERE user_id = #{userId}
+
+    </update>
+
+    <update id="deactivateUser"
+            parameterType="string">
+
+        UPDATE users
+        SET
+            user_status = 'DEACTIVATED',
+            updated_at = NOW()
+        WHERE user_id = #{userId}
+
+    </update>
+    <insert id="insertUserInterests">
+        INSERT INTO interest_users (
+            interest_id,
+            user_id,
+            created_at
+        )
+        VALUES
+        <foreach collection="interestIds" item="interestId" separator=",">
+            (#{interestId}, #{userId}, NOW())
+        </foreach>
+    </insert>
+
+    <select id="selectInterestsByUserId"
+            parameterType="java.lang.String"
+            resultType="com.kb.youngly.dto.auth.InterestOptionDTO">
+        SELECT i.interest_id,
+               i.interest_name,
+               i.is_investment AS investment,
+               i.created_at
+        FROM interest_users iu
+                 INNER JOIN interests i
+                            ON i.interest_id = iu.interest_id
+        WHERE iu.user_id = #{userId}
+        ORDER BY i.interest_id ASC
+    </select>
+
+    <delete id="deleteUserInterests">
+        DELETE FROM interest_users
+        WHERE user_id = #{userId}
+    </delete>
+    <update id="updateNotificationAgreement">
+        UPDATE users
+        SET
+            is_notification_agreement = #{isNotificationAgreement},
+            updated_at = NOW()
+        WHERE user_id = #{userId}
+    </update>
+    <select id="countExistingInterestIds" resultType="int">
+        SELECT COUNT(DISTINCT interest_id)
+        FROM interests
+        WHERE interest_id IN
+        <foreach
+                collection="interestIds"
+                item="interestId"
+                open="("
+                separator=","
+                close=")"
+        >
+            #{interestId}
+        </foreach>
+    </select>
+</mapper>

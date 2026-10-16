@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.kb.youngly.mapper.RoundSettlementMapper">
+
+    <!-- 진행 중 그룹에서 종료일의 다음 날이 된 정산 대기 라운드만 조회한다. -->
+    <select id="findDueSettlementGroupIds" resultType="string">
+        SELECT DISTINCT r.group_id
+        FROM rounds r
+        INNER JOIN `groups` g ON g.group_id = r.group_id
+        WHERE g.group_status = 'ONGOING'
+          AND r.round_status = 'WAITING_SETTLEMENT'
+          AND r.end_date = DATE_SUB(#{settlementDate}, INTERVAL 1 DAY)
+        ORDER BY r.group_id
+    </select>
+
+    <!-- 그룹 잠금 뒤에도 대상 상태와 종료일이 유지되는지 확인하고 라운드를 잠근다. -->
+    <select id="findWaitingRoundForUpdate"
+            resultType="com.kb.youngly.vo.round.RoundVO">
+        SELECT round_id,
+               group_id,
+               round_no,
+               start_date,
+               end_date,
+               round_status,
+               created_at
+        FROM rounds
+        WHERE group_id = #{groupId}
+          AND round_status = 'WAITING_SETTLEMENT'
+          AND end_date = #{endDate}
+        ORDER BY round_no DESC
+        LIMIT 1
+        FOR UPDATE
+    </select>
+
+    <!--
+        참가자별 송금은 REQUIRES_NEW 트랜잭션에서 KB 계좌를 잠근다. 바깥 정산 트랜잭션이
+        KB 계좌까지 먼저 잠그면 안쪽 송금이 같은 행을 기다리는 교착 상태가 생기므로,
+        이 쿼리에서는 미정산 round_history와 group_users만 먼저 잠근다.
+    -->
+    <select id="lockUnsettledParticipantsForUpdate" resultType="long">
+        SELECT rh.round_history_id
+        FROM round_history rh
+        INNER JOIN rounds r ON r.round_id = rh.round_id
+        INNER JOIN group_users gu
+                ON gu.group_id = r.group_id
+               AND gu.user_id = rh.user_id
+        WHERE rh.round_id = #{roundId}
+          AND rh.settlement_at IS NULL
+        ORDER BY gu.group_user_id, rh.round_history_id
+        FOR UPDATE
+    </select>
+
+    <!--
+        라운드 시작 때 고정한 수령 계좌와 모임통장을 실제 KB 계좌에 연결한다.
+        LEFT JOIN 결과를 서비스에서 검증하므로 연결 데이터가 누락된 참여자를
+        조용히 제외하지 않고 그룹 정산 전체를 실패시킬 수 있다.
+
+        이미 settlement_at이 기록된 참여자는 이전 시도에서 성공한 사람이므로 제외한다.
+        이를 통해 일부 실패 후 재실행하더라도 성공한 사람의 예치금을 다시 차감하지 않는다.
+        필요한 행 잠금은 바로 앞의 lockUnsettledParticipantsForUpdate에서 획득한다.
+    -->
+    <select id="findParticipantsForUpdate"
+            resultType="com.kb.youngly.dto.round.RoundSettlementParticipant">
+        SELECT rh.round_history_id,
+               rh.user_id,
+               rh.account_id,
+               rh.moim_account_id,
+               rh.rank_no,
+               gu.group_user_id,
+               gu.current_deposit_amount,
+               destination.kb_account_id AS destination_kb_account_id,
+               destination_kb.account_number AS destination_account_number,
+               destination_kb.name AS destination_account_name,
+               source.kb_account_id AS source_kb_account_id,
+               source_kb.account_number AS source_account_number,
+               source_kb.name AS source_account_name
+        FROM round_history rh
+        INNER JOIN rounds r ON r.round_id = rh.round_id
+        LEFT JOIN group_users gu
+               ON gu.group_id = r.group_id
+              AND gu.user_id = rh.user_id
+        LEFT JOIN accounts destination
+               ON destination.account_id = rh.account_id
+              AND destination.user_id = rh.user_id
+        LEFT JOIN kb_accounts destination_kb
+               ON destination_kb.kb_account_id = destination.kb_account_id
+        LEFT JOIN moim_accounts source
+               ON source.moim_account_id = rh.moim_account_id
+        LEFT JOIN kb_accounts source_kb
+               ON source_kb.kb_account_id = source.kb_account_id
+        WHERE rh.round_id = #{roundId}
+          AND rh.settlement_at IS NULL
+        ORDER BY gu.group_user_id, rh.round_history_id
+    </select>
+
+    <!--
+        prior_failure_response는 직전 라운드 실패에 대해 사용자가 선택한 대응값이다.
+        최종 정산을 시도한 시점부터 다음 라운드에는 이전 선택을 이월하지 않으므로,
+        개별 송금의 성공 여부와 관계없이 현재 라운드 참여자 전체에서 NULL로 초기화한다.
+    -->
+    <update id="clearPriorFailureResponses">
+        UPDATE round_history
+        SET prior_failure_response = NULL
+        WHERE round_id = #{roundId}
+          AND prior_failure_response IS NOT NULL
+    </update>
+
+    <!--
+        groups.user_id로 식별한 그룹장의 group_user_id를 조회한다.
+        kb_transfer_requests.group_user_id에 이 값을 저장하면 이후 그룹장이 자신의 책임 아래
+        실행된 정산 송금 중 FAILED/UNKNOWN 요청만 조회할 수 있다.
+    -->
+    <select id="findGroupLeaderGroupUserId" resultType="long">
+        SELECT group_user_id
+        FROM group_users
+        WHERE group_id = #{groupId}
+          AND user_id = #{leaderUserId}
+        FOR UPDATE
+    </select>
+
+    <!--
+        정산액을 참여자의 현재 예치금에서도 차감한다.
+        차감 후 금액이 그룹 최소 예치금보다 작으면 다음 라운드 재충전 대상인
+        PENDING_DEPOSIT으로 바꾸고, 충분하면 기존 상태를 유지한다.
+    -->
+    <update id="deductCurrentDepositAndUpdateStatus">
+        UPDATE group_users
+        SET group_user_status = CASE
+                WHEN current_deposit_amount - #{amount} &lt; #{baseDepositAmount}
+                    THEN 'PENDING_DEPOSIT'
+                ELSE group_user_status
+            END,
+            current_deposit_amount = current_deposit_amount - #{amount}
+        WHERE group_user_id = #{groupUserId}
+          AND group_user_status IN ('ACTIVE', 'PENDING_DEPOSIT')
+          AND current_deposit_amount &gt;= #{amount}
+    </update>
+
+    <!--
+        금액이 0원인 참여자도 정산 결과와 시각을 확정한다.
+        prior_failure_response는 요청한 다음 라운드 초기 상태를 위해 항상 NULL로 비운다.
+        settlement_at 조건은 이미 완료된 이력의 우발적인 재처리를 한 번 더 방지한다.
+    -->
+    <update id="updateRoundHistorySettlement">
+        UPDATE round_history
+        SET settlement_amount = #{settlementAmount},
+            prior_failure_response = NULL,
+            settlement_at = CURRENT_TIMESTAMP
+        WHERE round_history_id = #{roundHistoryId}
+          AND settlement_at IS NULL
+    </update>
+
+    <!-- 모임통장 출금과 개인계좌 입금을 동일한 통합 계좌 원장 형식으로 저장한다. -->
+    <insert id="insertAccountTransaction"
+            parameterType="com.kb.youngly.vo.account.AccountTransactionVO"
+            useGeneratedKeys="true"
+            keyProperty="accountTransactionId"
+            keyColumn="account_transaction_id">
+        INSERT INTO account_transactions (
+            kb_account_id,
+            group_user_id,
+            round_id,
+            transaction_type,
+            transaction_category,
+            amount,
+            balance_after,
+            idempotency_key,
+            description,
+            another_account_number,
+            another_bank_name,
+            another_name
+        ) VALUES (
+            #{kbAccountId},
+            #{groupUserId},
+            #{roundId},
+            #{transactionType},
+            #{transactionCategory},
+            #{amount},
+            #{balanceAfter},
+            #{idempotencyKey},
+            #{description},
+            #{anotherAccountNumber},
+            #{anotherBankName},
+            #{anotherName}
+        )
+    </insert>
+
+    <!--
+        개별 실패 송금을 재시도한 뒤 라운드를 최종 완료할 수 있는지 판단한다.
+        settlement_at은 예치금 차감과 양쪽 원장 저장까지 끝난 참여자에게만 채우므로,
+        NULL 행이 한 건이라도 남아 있으면 아직 WAITING_SETTLEMENT를 유지해야 한다.
+    -->
+    <select id="countUnsettledParticipants" resultType="int">
+        SELECT COUNT(*)
+        FROM round_history
+        WHERE round_id = #{roundId}
+          AND settlement_at IS NULL
+    </select>
+
+    <!-- 모든 참여자 처리가 끝난 경우에만 정산 대기 라운드를 최종 완료로 바꾼다. -->
+    <update id="markRoundSettled">
+        UPDATE rounds
+        SET round_status = 'SETTLED'
+        WHERE round_id = #{roundId}
+          AND round_status = 'WAITING_SETTLEMENT'
+          AND end_date = #{endDate}
+    </update>
+
+</mapper>

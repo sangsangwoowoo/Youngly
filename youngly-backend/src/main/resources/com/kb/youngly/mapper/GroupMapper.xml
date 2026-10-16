@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.kb.youngly.mapper.GroupMapper">
+
+    <insert id="insertGroup"
+            parameterType="com.kb.youngly.vo.group.GroupVO">
+
+        INSERT INTO `groups` (
+            group_id,
+            moim_account_id,
+            user_id,
+            invite_code,
+            group_name,
+            group_count,
+            custom_rule,
+            challenge_type,
+            content,
+            future_deposit_ratio_rule,
+            duration_days,
+            min_count,
+            round_cycle_days,
+            default_fail_pass_count,
+            base_deposit_amount,
+            group_status
+        )
+        VALUES (
+                   #{groupId},
+                   #{moimAccountId},
+                   #{userId},
+                   #{inviteCode},
+                   #{groupName},
+                   #{groupCount},
+                   #{customRule},
+                   #{challengeType},
+                   #{content},
+                   #{futureDepositRatioRule},
+                   #{durationDays},
+                   #{minCount},
+                   #{roundCycleDays},
+                   #{defaultFailPassCount},
+                   #{baseDepositAmount},
+                   #{groupStatus}
+               )
+
+    </insert>
+
+    <select id="findGroupsByUserId"
+            resultType="com.kb.youngly.dto.group.GroupListResponse">
+
+        SELECT
+            g.group_id AS groupId,
+            g.moim_account_id AS moimAccountId,
+            g.group_name AS groupName,
+            g.group_count AS groupCount,
+            g.challenge_type AS challengeType,
+            g.group_status AS groupStatus,
+            (
+                SELECT COUNT(*)
+                FROM group_users member
+                WHERE member.group_id = g.group_id
+                  AND member.group_user_status IN ('ACTIVE', 'PENDING_DEPOSIT')
+            ) AS memberCount,
+            CASE
+                WHEN g.user_id = #{userId} THEN TRUE
+                ELSE FALSE
+                END AS leader,
+            (
+                SELECT me.group_user_status
+                FROM group_users me
+                WHERE me.group_id = g.group_id
+                  AND me.user_id = #{userId}
+                LIMIT 1
+            ) AS myMembershipStatus
+        FROM `groups` g
+        WHERE g.user_id = #{userId}
+           OR EXISTS (
+            SELECT 1
+            FROM group_users gu
+            WHERE gu.group_id = g.group_id
+          AND gu.user_id = #{userId}
+          AND gu.group_user_status IN (
+            'ACTIVE',
+            'PENDING_DEPOSIT',
+            'PENDING_APPROVAL'
+            )
+            )
+        ORDER BY g.created_at DESC
+
+    </select>
+
+    <select id="findGroupById"
+            parameterType="string"
+            resultType="com.kb.youngly.vo.group.GroupVO">
+
+        SELECT
+            group_id,
+            moim_account_id,
+            user_id,
+            invite_code,
+            group_name,
+            group_count,
+            created_at,
+            custom_rule,
+            challenge_type,
+            content,
+            future_deposit_ratio_rule,
+            duration_days,
+            min_count,
+            round_cycle_days,
+            default_fail_pass_count,
+            base_deposit_amount,
+            group_status,
+            updated_at
+        FROM `groups`
+        WHERE group_id = #{groupId}
+
+    </select>
+
+    <update id="updateGroup"
+            parameterType="com.kb.youngly.vo.group.GroupVO">
+
+        UPDATE `groups`
+        SET
+            group_name = #{groupName},
+            custom_rule = #{customRule},
+            challenge_type = #{challengeType},
+            content = #{content},
+            future_deposit_ratio_rule = #{futureDepositRatioRule},
+            duration_days = #{durationDays},
+            min_count = #{minCount},
+            round_cycle_days = #{roundCycleDays},
+            default_fail_pass_count = #{defaultFailPassCount},
+            base_deposit_amount = #{baseDepositAmount},
+            updated_at = NOW()
+        WHERE group_id = #{groupId}
+
+    </update>
+
+    <update id="finishGroup"
+            parameterType="string">
+
+        UPDATE `groups`
+        SET
+            group_status = 'FINISHED',
+            updated_at = NOW()
+        WHERE group_id = #{groupId}
+
+    </update>
+
+    <select id="findGroupByInviteCode"
+            parameterType="string"
+            resultType="com.kb.youngly.vo.group.GroupVO">
+
+        SELECT
+            group_id,
+            moim_account_id,
+            user_id,
+            invite_code,
+            group_name,
+            group_count,
+            created_at,
+            custom_rule,
+            challenge_type,
+            content,
+            future_deposit_ratio_rule,
+            duration_days,
+            min_count,
+            round_cycle_days,
+            default_fail_pass_count,
+            base_deposit_amount,
+            group_status,
+            updated_at
+        FROM `groups`
+        WHERE invite_code = #{inviteCode}
+
+    </select>
+
+    <update id="updateInviteCode">
+
+        UPDATE `groups`
+        SET invite_code = #{inviteCode}
+        WHERE group_id = #{groupId}
+
+    </update>
+
+    <select id="existsInviteCode"
+            parameterType="string"
+            resultType="boolean">
+
+        SELECT EXISTS(
+            SELECT 1
+            FROM `groups`
+            WHERE invite_code = #{inviteCode}
+        )
+
+    </select>
+
+    <update id="updateChallenge"
+            parameterType="com.kb.youngly.vo.group.GroupVO">
+
+        UPDATE `groups`
+        SET
+            challenge_type = #{challengeType},
+            content = #{content},
+            future_deposit_ratio_rule = #{futureDepositRatioRule},
+            duration_days = #{durationDays},
+            min_count = #{minCount},
+            round_cycle_days = #{roundCycleDays},
+            base_deposit_amount = #{baseDepositAmount},
+            updated_at = NOW()
+        WHERE group_id = #{groupId}
+
+    </update>
+
+    <update id="deleteChallenge">
+
+        UPDATE `groups`
+        SET
+            challenge_type = 'DRAFT',
+            content = NULL,
+            future_deposit_ratio_rule = '',
+            duration_days = 7,
+            min_count = 1,
+            round_cycle_days = 28,
+            base_deposit_amount = 0,
+            updated_at = NOW()
+        WHERE group_id = #{groupId}
+
+    </update>
+</mapper>

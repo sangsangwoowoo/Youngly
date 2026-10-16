@@ -1,0 +1,203 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.kb.youngly.mapper.MarketDailySnapshotMapper">
+
+    <insert id="upsertMarketDailySnapshot"
+            parameterType="com.kb.youngly.vo.market.MarketDailySnapshotVO"
+            useGeneratedKeys="true"
+            keyProperty="id">
+        INSERT INTO market_daily_snapshot (
+            market_date,
+            source_subject,
+            pdf_file_name,
+            pdf_url,
+            raw_text,
+            summary_text,
+            market_headline_text,
+            market_detail_text,
+            kospi,
+            kosdaq,
+            nasdaq,
+            usdkrw,
+            treasury_3y
+        ) VALUES (
+            #{marketDate},
+            #{sourceSubject},
+            #{pdfFileName},
+            #{pdfUrl},
+            #{rawText},
+            #{summaryText},
+            #{marketHeadlineText},
+            #{marketDetailText},
+            #{kospi},
+            #{kosdaq},
+            #{nasdaq},
+            #{usdkrw},
+            #{treasury3y}
+        )
+        ON DUPLICATE KEY UPDATE
+            market_date = VALUES(market_date),
+            source_subject = VALUES(source_subject),
+            pdf_file_name = VALUES(pdf_file_name),
+            pdf_url = VALUES(pdf_url),
+            raw_text = VALUES(raw_text),
+            summary_text = VALUES(summary_text),
+            kospi = VALUES(kospi),
+            kosdaq = VALUES(kosdaq),
+            nasdaq = VALUES(nasdaq),
+            usdkrw = VALUES(usdkrw),
+            treasury_3y = VALUES(treasury_3y),
+            updated_at = CURRENT_TIMESTAMP
+    </insert>
+
+    <select id="findByPdfFileName" resultType="com.kb.youngly.vo.market.MarketDailySnapshotVO">
+        SELECT
+            id,
+            market_date,
+            source_subject,
+            pdf_file_name,
+            pdf_url,
+            raw_text,
+            summary_text,
+            market_headline_text,
+            market_detail_text,
+            kospi,
+            kosdaq,
+            nasdaq,
+            usdkrw,
+            treasury_3y,
+            created_at,
+            updated_at
+        FROM market_daily_snapshot
+        WHERE pdf_file_name = #{pdfFileName}
+    </select>
+
+    <select id="findByMarketDateAndSourceSubject" resultType="com.kb.youngly.vo.market.MarketDailySnapshotVO">
+        SELECT
+            id,
+            market_date,
+            source_subject,
+            pdf_file_name,
+            pdf_url,
+            raw_text,
+            summary_text,
+            market_headline_text,
+            market_detail_text,
+            kospi,
+            kosdaq,
+            nasdaq,
+            usdkrw,
+            treasury_3y,
+            created_at,
+            updated_at
+        FROM market_daily_snapshot
+        WHERE market_date = #{marketDate}
+          AND source_subject = #{sourceSubject}
+    </select>
+
+    <select id="findRecentSnapshots" resultType="com.kb.youngly.vo.market.MarketDailySnapshotVO">
+        SELECT
+            id,
+            market_date,
+            source_subject,
+            pdf_file_name,
+            pdf_url,
+            raw_text,
+            summary_text,
+            market_headline_text,
+            market_detail_text,
+            kospi,
+            kosdaq,
+            nasdaq,
+            usdkrw,
+            treasury_3y,
+            created_at,
+            updated_at
+        FROM market_daily_snapshot
+        WHERE market_date BETWEEN #{from} AND #{to}
+        ORDER BY market_date DESC, id DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="findSnapshotsByMarketDate" resultType="com.kb.youngly.vo.market.MarketDailySnapshotVO">
+        SELECT
+            id,
+            market_date,
+            source_subject,
+            pdf_file_name,
+            pdf_url,
+            raw_text,
+            summary_text,
+            market_headline_text,
+            market_detail_text,
+            kospi,
+            kosdaq,
+            nasdaq,
+            usdkrw,
+            treasury_3y,
+            created_at,
+            updated_at
+        FROM market_daily_snapshot
+        WHERE market_date = #{marketDate}
+        ORDER BY id ASC
+    </select>
+
+    <select id="findLatestSnapshotWithMarketSummary" resultType="com.kb.youngly.vo.market.MarketDailySnapshotVO">
+        SELECT
+            id,
+            market_date,
+            source_subject,
+            pdf_file_name,
+            pdf_url,
+            raw_text,
+            summary_text,
+            market_headline_text,
+            market_detail_text,
+            kospi,
+            kosdaq,
+            nasdaq,
+            usdkrw,
+            treasury_3y,
+            created_at,
+            updated_at
+        FROM market_daily_snapshot
+        WHERE market_date BETWEEN #{from} AND #{to}
+          AND market_headline_text IS NOT NULL
+          AND market_headline_text != ''
+          AND market_detail_text IS NOT NULL
+          AND market_detail_text != ''
+        ORDER BY market_date DESC, updated_at DESC, id DESC
+        LIMIT 1
+    </select>
+
+    <update id="updateMarketSummary">
+        UPDATE market_daily_snapshot
+        SET market_headline_text = #{marketHeadlineText},
+            market_detail_text = #{marketDetailText},
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = #{id}
+    </update>
+
+    <update id="updateMarketSummaryIfAbsent">
+        UPDATE market_daily_snapshot
+        SET market_headline_text = #{marketHeadlineText},
+            market_detail_text = #{marketDetailText},
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = #{id}
+          AND (market_headline_text IS NULL OR market_headline_text = ''
+               OR market_detail_text IS NULL OR market_detail_text = '')
+    </update>
+
+    <delete id="deleteByPdfFileName" parameterType="string">
+        DELETE FROM market_daily_snapshot
+        WHERE pdf_file_name = #{pdfFileName}
+    </delete>
+
+    <delete id="deleteByMarketDateAndSourceSubject">
+        DELETE FROM market_daily_snapshot
+        WHERE market_date = #{marketDate}
+          AND source_subject = #{sourceSubject}
+    </delete>
+</mapper>
